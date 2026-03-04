@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as pgENUM
 
 revision: str = "0001"
 down_revision: Union[str, None] = None
@@ -18,18 +19,20 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     # ── Enums ──────────────────────────────────────────────────────────────────
-    language_enum = sa.Enum("RU", "KZ", name="language_enum")
-    farm_culture_enum = sa.Enum("carrot", "apple", name="farm_culture_enum")
-    product_enum = sa.Enum("carrot", "apple", "trout", "honey", name="product_enum")
-    order_status_enum = sa.Enum(
-        "Created", "Confirmed", "Preparing", "Delivering", "Delivered", "Cancelled",
-        name="order_status_enum",
-    )
+    # Create enum types via raw SQL (DO block = idempotent + stays in transaction)
+    op.execute(sa.text("DO $$ BEGIN CREATE TYPE language_enum AS ENUM ('RU', 'KZ'); EXCEPTION WHEN duplicate_object THEN null; END $$;"))
+    op.execute(sa.text("DO $$ BEGIN CREATE TYPE farm_culture_enum AS ENUM ('carrot', 'apple'); EXCEPTION WHEN duplicate_object THEN null; END $$;"))
+    op.execute(sa.text("DO $$ BEGIN CREATE TYPE product_enum AS ENUM ('carrot', 'apple', 'trout', 'honey'); EXCEPTION WHEN duplicate_object THEN null; END $$;"))
+    op.execute(sa.text("DO $$ BEGIN CREATE TYPE order_status_enum AS ENUM ('Created', 'Confirmed', 'Preparing', 'Delivering', 'Delivered', 'Cancelled'); EXCEPTION WHEN duplicate_object THEN null; END $$;"))
 
-    language_enum.create(op.get_bind(), checkfirst=True)
-    farm_culture_enum.create(op.get_bind(), checkfirst=True)
-    product_enum.create(op.get_bind(), checkfirst=True)
-    order_status_enum.create(op.get_bind(), checkfirst=True)
+    # Use postgresql.ENUM(create_type=False) — guaranteed not to re-emit CREATE TYPE
+    language_enum = pgENUM("RU", "KZ", name="language_enum", create_type=False)
+    farm_culture_enum = pgENUM("carrot", "apple", name="farm_culture_enum", create_type=False)
+    product_enum = pgENUM("carrot", "apple", "trout", "honey", name="product_enum", create_type=False)
+    order_status_enum = pgENUM(
+        "Created", "Confirmed", "Preparing", "Delivering", "Delivered", "Cancelled",
+        name="order_status_enum", create_type=False,
+    )
 
     # ── users ──────────────────────────────────────────────────────────────────
     op.create_table(
@@ -43,7 +46,7 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("(datetime('now'))"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
     )
     op.create_index("ix_users_username", "users", ["username"])
@@ -141,7 +144,7 @@ def upgrade() -> None:
             "collected_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("(datetime('now'))"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
     )
     op.create_index("ix_inventory_user_id", "inventory", ["user_id"])
@@ -161,7 +164,7 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("(datetime('now'))"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
     )
     op.create_index("ix_orders_user_id", "orders", ["user_id"])

@@ -6,24 +6,29 @@ POST /auth/login     — obtain access + refresh tokens
 POST /auth/refresh   — exchange refresh token for new access token
 """
 
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from jose import jwt
 from passlib.context import CryptContext
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
-from ..database import async_session
 from ..deps import get_db, get_redis
 from ..models import User, Wallet, Goodness, FarmState, FishState, BeeState, DeliveryProfile
-from ..schemas import Token, UserCreate, UserRead, LoginRequest, TokenPayload
+from ..schemas import Token, UserCreate, LoginRequest, TokenPayload
 from redis.asyncio import Redis
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
 
 
 def _hash_password(password: str) -> str:
@@ -48,7 +53,6 @@ def _create_refresh_token(user_id: str) -> str:
 
 async def _init_user_records(user_id: str, db: AsyncSession) -> None:
     """Create all related records for a new user with initial values."""
-    import time
     now_ms = int(time.time() * 1000)
 
     db.add(Wallet(user_id=user_id))
@@ -59,13 +63,12 @@ async def _init_user_records(user_id: str, db: AsyncSession) -> None:
     db.add(DeliveryProfile(user_id=user_id))
 
 
-@router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+@router.post("/register", response_model=Token)
 async def register(
     body: UserCreate,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ):
-    # Check username uniqueness
     existing = await db.execute(select(User).where(User.username == body.username))
     if existing.scalar_one_or_none():
         raise HTTPException(
@@ -79,12 +82,17 @@ async def register(
         language=body.language,
     )
     db.add(user)
-    await db.flush()  # get user.id
+    await db.flush()
 
     await _init_user_records(user.id, db)
     await db.commit()
-    await db.refresh(user)
-    return user
+
+    # ✅ БАГ 1+2 исправлены: генерируем токены и сохраняем в Redis
+    access_token = _create_access_token(user.id)
+    refresh_token = _create_refresh_token(user.id)
+    await redis.set(f"session:{user.id}", refresh_token, ex=7 * 24 * 3600)
+
+    return Token(access_token=access_token, refresh_token=refresh_token)
 
 
 @router.post("/login", response_model=Token)
@@ -103,21 +111,19 @@ async def login(
 
     access_token = _create_access_token(user.id)
     refresh_token = _create_refresh_token(user.id)
-
-    # Store refresh token in Redis with 7-day TTL
     await redis.set(f"session:{user.id}", refresh_token, ex=7 * 24 * 3600)
 
     return Token(access_token=access_token, refresh_token=refresh_token)
 
 
 @router.post("/refresh", response_model=Token)
-async def refresh_token(
-    refresh_token: str,
+async def refresh_token_endpoint(  # ✅ БАГ 5: переименована функция
+    body: RefreshRequest,          # ✅ БАГ 4: токен из body, не query
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ):
     try:
-        payload = jwt.decode(refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jwt.decode(body.refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         token_data = TokenPayload(**payload)
     except Exception:
         raise HTTPException(
@@ -126,7 +132,7 @@ async def refresh_token(
         )
 
     stored = await redis.get(f"session:{token_data.sub}")
-    if stored != refresh_token:
+    if stored != body.refresh_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token revoked or not found",

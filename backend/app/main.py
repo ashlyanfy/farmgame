@@ -30,9 +30,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "*",  # replace with your production domain
+        "*",  # TODO: в продакшене заменить на конкретный домен
     ],
-    allow_credentials=True,
+    allow_credentials=False,  # Bearer-токены не требуют credentials; allow_origins="*" + credentials=True невалидна по CORS-спецификации
     allow_methods=["*"],
     allow_headers=["*"],
 )

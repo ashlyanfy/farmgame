@@ -60,16 +60,16 @@ async def award_daily_login(
 ) -> int:
     """
     Award daily login bonus (+10). Returns points awarded (0 if already claimed today).
-    Uses Redis key daily_login:{user_id}:{YYYY-MM-DD} with TTL 25h.
+    Uses atomic Redis SET NX to prevent race conditions.
     """
     today = _almaty_today()
     redis_key = f"daily_login:{user_id}:{today}"
 
-    already_claimed = await redis.get(redis_key)
-    if already_claimed:
+    # Атомарная операция: SET если ключа нет (NX), иначе возвращает None
+    set_result = await redis.set(redis_key, "1", ex=25 * 3600, nx=True)
+    if set_result is None:
         return 0
 
-    await redis.set(redis_key, "1", ex=25 * 3600)
     return await _add_goodness(user_id, DAILY_LOGIN_BONUS, db)
 
 
@@ -113,7 +113,7 @@ async def award_collect(
 
 
 async def _add_goodness(user_id: str, points: int, db: AsyncSession) -> int:
-    """Internal: add points to the user's goodness record and update level."""
+    """Internal: add points to the user's goodness record and update level + today_count."""
     goodness = await db.get(Goodness, user_id)
     if goodness is None:
         goodness = Goodness(user_id=user_id, value=0, goal=100, level=1)
@@ -121,5 +121,6 @@ async def _add_goodness(user_id: str, points: int, db: AsyncSession) -> int:
 
     goodness.value += points
     goodness.level = _compute_level(goodness.value)
+    goodness.today_count = (goodness.today_count or 0) + points
     await db.flush()
     return points
