@@ -25,7 +25,6 @@ services:
     name: moya-ferma-frontend
     runtime: static
     rootDir: frontend
-    region: frankfurt
     plan: free
     buildCommand: npm install && npm run build
     staticPublishPath: dist
